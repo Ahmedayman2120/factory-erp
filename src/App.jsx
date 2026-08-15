@@ -71,19 +71,22 @@ export default function FactoryERP() {
   const [session, setSession] = useState(undefined); // undefined = loading, null = logged out
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(SESSION_KEY);
-      setSession(raw ? JSON.parse(raw) : null);
-    } catch (e) { setSession(null); }
+    (async () => {
+      try {
+        const res = await window.storage.get(SESSION_KEY, false);
+        if (res && res.value) setSession(JSON.parse(res.value));
+        else setSession(null);
+      } catch (e) { setSession(null); }
+    })();
   }, []);
 
-  const handleLogin = (sess) => {
+  const handleLogin = async (sess) => {
     setSession(sess);
-    try { localStorage.setItem(SESSION_KEY, JSON.stringify(sess)); } catch (e) {}
+    try { await window.storage.set(SESSION_KEY, JSON.stringify(sess), false); } catch (e) {}
   };
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setSession(null);
-    try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+    try { await window.storage.delete(SESSION_KEY, false); } catch (e) {}
   };
 
   if (session === undefined) return <CenterMsg>جارِ التحميل...</CenterMsg>;
@@ -153,6 +156,7 @@ function POSOnlyApp({ session, onLogout }) {
   const [msg, setMsg] = useState("");
   const [sessionTotal, setSessionTotal] = useState(0);
   const [sessionCount, setSessionCount] = useState(0);
+  const [barcodeInput, setBarcodeInput] = useState("");
 
   const loadAll = useCallback(async () => {
     try {
@@ -172,14 +176,23 @@ function POSOnlyApp({ session, onLogout }) {
 
   const total = cart.reduce((a, i) => a + i.qty * i.price, 0);
 
-  const addItem = () => {
-    const prod = products.find(p => p.id === pick);
+  const addProductToCart = (prod) => {
     if (!prod) return;
     setCart(c => {
       const existing = c.find(i => i.productId === prod.id);
       if (existing) return c.map(i => i.productId === prod.id ? { ...i, qty: i.qty + 1 } : i);
       return [...c, { productId: prod.id, name: prod.name, qty: 1, price: prod.price, maxStock: prod.stock }];
     });
+  };
+  const addItem = () => addProductToCart(products.find(p => p.id === pick));
+  const handleBarcodeEnter = (e) => {
+    if (e.key !== "Enter") return;
+    const code = barcodeInput.trim();
+    setBarcodeInput("");
+    if (!code) return;
+    const prod = products.find(p => p.barcode && p.barcode === code);
+    if (prod) { addProductToCart(prod); setErr(""); }
+    else setErr(`مفيش منتج بالباركود: ${code}`);
   };
   const updateQty = (pid, qty) => setCart(c => c.map(i => i.productId === pid ? { ...i, qty: Number(qty) } : i));
   const removeItem = (pid) => setCart(c => c.filter(i => i.productId !== pid));
@@ -224,9 +237,14 @@ function POSOnlyApp({ session, onLogout }) {
 
         <Card style={{ padding: 16, marginBottom: 16 }}>
           <SectionTitle>إضافة أصناف</SectionTitle>
+          <div style={{ marginBottom: 12 }}>
+            <Field label="امسح الباركود">
+              <Input autoFocus value={barcodeInput} onChange={e => setBarcodeInput(e.target.value)} onKeyDown={handleBarcodeEnter} placeholder="وجّه السكانر هنا وامسح الكود..." style={{ borderColor: ACCENT }} />
+            </Field>
+          </div>
           <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
             <Select value={pick} onChange={e => setPick(e.target.value)}>
-              <option value="">اختر منتج...</option>
+              <option value="">أو اختر منتج يدويًا...</option>
               {products.map(p => <option key={p.id} value={p.id}>{p.name} — متاح {p.stock}</option>)}
             </Select>
             <PrimaryBtn onClick={addItem}><Plus size={15} /> إضافة</PrimaryBtn>
@@ -291,6 +309,8 @@ const NAV_SECTIONS = [
     { key: "treasury", label: "الخزينة والحسابات", icon: Coins },
     { key: "expenses", label: "المصروفات والمسحوبات", icon: Wallet },
     { key: "reports", label: "التقارير", icon: PieChart },
+    { key: "salaries", label: "الرواتب", icon: Wallet },
+    { key: "settlement", label: "تصفية صاحب المشروع", icon: Coins },
     { key: "settings", label: "الإعدادات", icon: Settings },
   ]},
 ];
@@ -303,7 +323,7 @@ function AdminApp({ session, onLogout }) {
 
   const loadAll = useCallback(async () => {
     try {
-      const [products, customers, suppliers, sales, purchases, cutting, shipping, expenses, settings] = await Promise.all([
+      const [products, customers, suppliers, sales, purchases, cutting, shipping, expenses, settings, shippers, employees, salaryPayments, settlements] = await Promise.all([
         list("products", session.token, "select=*&order=name.asc"),
         list("customers", session.token, "select=*&order=name.asc"),
         list("suppliers", session.token, "select=*&order=name.asc"),
@@ -313,8 +333,12 @@ function AdminApp({ session, onLogout }) {
         list("shipping", session.token, "select=*&order=date.desc"),
         list("expenses", session.token, "select=*&order=date.desc"),
         list("settings", session.token, "select=*"),
+        list("shippers", session.token, "select=*&order=name.asc"),
+        list("employees", session.token, "select=*&order=name.asc"),
+        list("salary_payments", session.token, "select=*&order=date.desc"),
+        list("settlements", session.token, "select=*&order=date.desc"),
       ]);
-      setData({ products, customers, suppliers, sales, purchases, cutting, shipping, expenses, season: settings?.[0]?.season || "-" });
+      setData({ products, customers, suppliers, sales, purchases, cutting, shipping, expenses, shippers, employees, salaryPayments, settlements, season: settings?.[0]?.season || "-" });
     } catch (e) { setErr(e.message); }
   }, [session.token]);
 
@@ -376,10 +400,12 @@ function AdminApp({ session, onLogout }) {
             {view === "suppliers" && <SuppliersView {...ctx} />}
             {view === "cutting" && <CuttingView {...ctx} />}
             {view === "shipping" && <ShippingView {...ctx} />}
-            {view === "shippers" && <ShippersView />}
+            {view === "shippers" && <ShippersView {...ctx} />}
             {view === "treasury" && <TreasuryView {...ctx} />}
             {view === "expenses" && <ExpensesView {...ctx} />}
             {view === "reports" && <ReportsView {...ctx} />}
+            {view === "salaries" && <SalariesView {...ctx} />}
+            {view === "settlement" && <SettlementView {...ctx} />}
             {view === "settings" && <SettingsView {...ctx} />}
           </div>
         </main>
@@ -496,7 +522,7 @@ function ProductsView({ session, data, reload }) {
   const save = async () => {
     setErr("");
     try {
-      const payload = { name: form.name, sku: form.sku, category: form.category, cost: Number(form.cost), price: Number(form.price), stock: Number(form.stock), unit: form.unit };
+      const payload = { name: form.name, sku: form.sku, barcode: form.barcode || null, category: form.category, cost: Number(form.cost), price: Number(form.price), stock: Number(form.stock), unit: form.unit };
       if (form.id) await update("products", session.token, form.id, payload);
       else await insert("products", session.token, payload);
       setForm(null); reload();
@@ -505,7 +531,7 @@ function ProductsView({ session, data, reload }) {
   const del = async (id) => { try { await remove("products", session.token, id); reload(); } catch (e) { setErr(e.message); } };
 
   return <div>
-    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ name: "", sku: "", category: "", cost: "", price: "", stock: "", unit: "قطعة" })}><Plus size={15} /> منتج جديد</PrimaryBtn>}>المنتجات والمخزون</SectionTitle>
+    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ name: "", sku: "", barcode: "", category: "", cost: "", price: "", stock: "", unit: "قطعة" })}><Plus size={15} /> منتج جديد</PrimaryBtn>}>المنتجات والمخزون</SectionTitle>
     <ErrBanner err={err} />
     <div style={{ marginBottom: 12, maxWidth: 320 }}>
       <div style={{ position: "relative" }}>
@@ -536,6 +562,7 @@ function ProductsView({ session, data, reload }) {
       <div style={{ display: "grid", gap: 10 }}>
         <Field label="اسم المنتج"><Input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></Field>
         <Field label="الكود (SKU)"><Input value={form.sku} onChange={e => setForm({ ...form, sku: e.target.value })} /></Field>
+        <Field label="الباركود"><Input value={form.barcode || ""} onChange={e => setForm({ ...form, barcode: e.target.value })} placeholder="امسحه بالسكانر أو اكتبه يدويًا" /></Field>
         <Field label="الفئة"><Input value={form.category} onChange={e => setForm({ ...form, category: e.target.value })} /></Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="التكلفة"><Input type="number" required value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} /></Field>
@@ -559,16 +586,26 @@ function POSView({ session, data, reload }) {
   const [paid, setPaid] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
+  const [barcodeInput, setBarcodeInput] = useState("");
   const total = cart.reduce((a, i) => a + i.qty * i.price, 0);
 
-  const addItem = () => {
-    const prod = data.products.find(p => p.id === pick);
+  const addProductToCart = (prod) => {
     if (!prod) return;
     setCart(c => {
       const existing = c.find(i => i.productId === prod.id);
       if (existing) return c.map(i => i.productId === prod.id ? { ...i, qty: i.qty + 1 } : i);
       return [...c, { productId: prod.id, name: prod.name, qty: 1, price: prod.price }];
     });
+  };
+  const addItem = () => addProductToCart(data.products.find(p => p.id === pick));
+  const handleBarcodeEnter = (e) => {
+    if (e.key !== "Enter") return;
+    const code = barcodeInput.trim();
+    setBarcodeInput("");
+    if (!code) return;
+    const prod = data.products.find(p => p.barcode && p.barcode === code);
+    if (prod) { addProductToCart(prod); setErr(""); }
+    else setErr(`مفيش منتج بالباركود: ${code}`);
   };
   const updateQty = (pid, qty) => setCart(c => c.map(i => i.productId === pid ? { ...i, qty: Number(qty) } : i));
   const removeItem = (pid) => setCart(c => c.filter(i => i.productId !== pid));
@@ -590,9 +627,14 @@ function POSView({ session, data, reload }) {
     <ErrBanner err={err} />
     <Card style={{ padding: 16, flex: "2 1 380px" }}>
       <SectionTitle>إضافة أصناف</SectionTitle>
+      <div style={{ marginBottom: 12 }}>
+        <Field label="امسح الباركود">
+          <Input autoFocus value={barcodeInput} onChange={e => setBarcodeInput(e.target.value)} onKeyDown={handleBarcodeEnter} placeholder="وجّه السكانر هنا وامسح الكود..." style={{ borderColor: ACCENT }} />
+        </Field>
+      </div>
       <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
         <Select value={pick} onChange={e => setPick(e.target.value)}>
-          <option value="">اختر منتج...</option>
+          <option value="">أو اختر منتج يدويًا...</option>
           {data.products.map(p => <option key={p.id} value={p.id}>{p.name} — متاح {p.stock}</option>)}
         </Select>
         <PrimaryBtn onClick={addItem}><Plus size={15} /> إضافة</PrimaryBtn>
@@ -946,7 +988,16 @@ function ShippingView({ session, data, reload }) {
         <Field label="العميل"><Select value={form.customerId} onChange={e => setForm({ ...form, customerId: e.target.value })}>
           {data.customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </Select></Field>
-        <Field label="شركة الشحن"><Input value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} /></Field>
+        <Field label="شركة الشحن">
+          {(data.shippers && data.shippers.length > 0) ? (
+            <Select value={form.company} onChange={e => setForm({ ...form, company: e.target.value })}>
+              <option value="">اختر شركة شحن...</option>
+              {data.shippers.map(s => <option key={s.id} value={s.name}>{s.name}</option>)}
+            </Select>
+          ) : (
+            <Input value={form.company} onChange={e => setForm({ ...form, company: e.target.value })} placeholder="أضف شركات شحن أولًا من قسم شركات الشحن" />
+          )}
+        </Field>
         <Field label="رقم التتبع"><Input value={form.trackingNo} onChange={e => setForm({ ...form, trackingNo: e.target.value })} /></Field>
         <Field label="الحالة"><Select value={form.status} onChange={e => setForm({ ...form, status: e.target.value })}>
           <option>قيد التجهيز</option><option>في الطريق</option><option>تم التسليم</option>
@@ -957,8 +1008,49 @@ function ShippingView({ session, data, reload }) {
   </div>;
 }
 
-function ShippersView() {
-  return <Card style={{ padding: 24, textAlign: "center", color: "#8a8a92" }}>قسم شركات الشحن — قريبًا يمكن إضافة بيانات شركات الشحن.</Card>;
+function ShippersView({ session, data, reload }) {
+  const [form, setForm] = useState(null);
+  const [err, setErr] = useState("");
+  const save = async () => {
+    setErr("");
+    try {
+      const payload = { name: form.name, phone: form.phone, notes: form.notes };
+      if (form.id) await update("shippers", session.token, form.id, payload);
+      else await insert("shippers", session.token, payload);
+      setForm(null); reload();
+    } catch (e2) { setErr(e2.message); }
+  };
+  const del = async (id) => { try { await remove("shippers", session.token, id); reload(); } catch (e) { setErr(e.message); } };
+
+  return <div>
+    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ name: "", phone: "", notes: "" })}><Plus size={15} /> شركة شحن جديدة</PrimaryBtn>}>شركات الشحن</SectionTitle>
+    <ErrBanner err={err} />
+    <Card style={{ overflow: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
+        <thead><tr><Th>الاسم</Th><Th>رقم التواصل</Th><Th>ملاحظات (تسعيرة/مناطق)</Th><Th></Th></tr></thead>
+        <tbody>
+          {(data.shippers || []).map(s => (
+            <tr key={s.id}>
+              <Td style={{ fontWeight: 600 }}>{s.name}</Td><Td>{s.phone}</Td><Td>{s.notes}</Td>
+              <Td><div style={{ display: "flex", gap: 6 }}>
+                <GhostBtn onClick={() => setForm(s)}><Edit2 size={13} /></GhostBtn>
+                <GhostBtn onClick={() => del(s.id)} style={{ color: "#c0392b" }}><Trash2 size={13} /></GhostBtn>
+              </div></Td>
+            </tr>
+          ))}
+          {(!data.shippers || data.shippers.length === 0) && <EmptyRow colSpan={4} text="لا توجد شركات شحن مضافة بعد" />}
+        </tbody>
+      </table>
+    </Card>
+    {form && <Modal onClose={() => setForm(null)} title={form.id ? "تعديل شركة شحن" : "شركة شحن جديدة"}>
+      <div style={{ display: "grid", gap: 10 }}>
+        <Field label="الاسم"><Input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></Field>
+        <Field label="رقم التواصل"><Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></Field>
+        <Field label="ملاحظات (تسعيرة الشحن، المناطق المخدومة...)"><Input value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field>
+        <PrimaryBtn onClick={save} style={{ justifyContent: "center", marginTop: 6 }}><Save size={15} /> حفظ</PrimaryBtn>
+      </div>
+    </Modal>}
+  </div>;
 }
 
 // ================= TREASURY =================
@@ -1077,6 +1169,165 @@ function ReportsView({ data }) {
 }
 
 // ================= SETTINGS =================
+// ================= SALARIES =================
+function SalariesView({ session, data, reload }) {
+  const [empForm, setEmpForm] = useState(null);
+  const [payForm, setPayForm] = useState(null);
+  const [err, setErr] = useState("");
+
+  const saveEmp = async () => {
+    setErr("");
+    try {
+      const payload = { name: empForm.name, phone: empForm.phone, role: empForm.role, monthly_salary: Number(empForm.monthly_salary) || 0 };
+      if (empForm.id) await update("employees", session.token, empForm.id, payload);
+      else await insert("employees", session.token, payload);
+      setEmpForm(null); reload();
+    } catch (e2) { setErr(e2.message); }
+  };
+  const delEmp = async (id) => { try { await remove("employees", session.token, id); reload(); } catch (e) { setErr(e.message); } };
+
+  const savePay = async () => {
+    setErr("");
+    try {
+      const payload = { employee_id: payForm.employeeId, date: payForm.date, month: payForm.month, amount: Number(payForm.amount) || 0, notes: payForm.notes };
+      await insert("salary_payments", session.token, payload);
+      setPayForm(null); reload();
+    } catch (e2) { setErr(e2.message); }
+  };
+  const delPay = async (id) => { try { await remove("salary_payments", session.token, id); reload(); } catch (e) { setErr(e.message); } };
+
+  const employees = data.employees || [];
+  const payments = data.salaryPayments || [];
+
+  return <div>
+    <SectionTitle action={<PrimaryBtn onClick={() => setEmpForm({ name: "", phone: "", role: "", monthly_salary: "" })}><Plus size={15} /> موظف جديد</PrimaryBtn>}>الرواتب</SectionTitle>
+    <ErrBanner err={err} />
+    <Card style={{ overflow: "auto", marginBottom: 16 }}>
+      <div style={{ padding: "14px 16px 0" }}><strong style={{ fontSize: 14.5 }}>الموظفين</strong></div>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 650, marginTop: 8 }}>
+        <thead><tr><Th>الاسم</Th><Th>الوظيفة</Th><Th>الهاتف</Th><Th>الراتب الشهري</Th><Th></Th></tr></thead>
+        <tbody>
+          {employees.map(e => (
+            <tr key={e.id}>
+              <Td style={{ fontWeight: 600 }}>{e.name}</Td><Td>{e.role}</Td><Td>{e.phone}</Td><Td>{fmt(e.monthly_salary)}</Td>
+              <Td><div style={{ display: "flex", gap: 6 }}>
+                <GhostBtn onClick={() => setEmpForm(e)}><Edit2 size={13} /></GhostBtn>
+                <GhostBtn onClick={() => delEmp(e.id)} style={{ color: "#c0392b" }}><Trash2 size={13} /></GhostBtn>
+              </div></Td>
+            </tr>
+          ))}
+          {employees.length === 0 && <EmptyRow colSpan={5} text="لا يوجد موظفين مضافين بعد" />}
+        </tbody>
+      </table>
+    </Card>
+
+    <Card style={{ overflow: "auto" }}>
+      <div style={{ padding: "14px 16px 0", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <strong style={{ fontSize: 14.5 }}>سجل صرف الرواتب</strong>
+        <PrimaryBtn onClick={() => setPayForm({ employeeId: employees[0]?.id || "", date: today(), month: "", amount: "", notes: "" })} style={{ margin: "10px 16px 0 0" }}><Plus size={15} /> صرف راتب</PrimaryBtn>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 650, marginTop: 8 }}>
+        <thead><tr><Th>التاريخ</Th><Th>الموظف</Th><Th>الشهر</Th><Th>القيمة</Th><Th>ملاحظات</Th><Th></Th></tr></thead>
+        <tbody>
+          {payments.map(p => (
+            <tr key={p.id}>
+              <Td>{p.date}</Td><Td>{employees.find(e => e.id === p.employee_id)?.name || "-"}</Td><Td>{p.month}</Td>
+              <Td style={{ fontWeight: 700 }}>{fmt(p.amount)}</Td><Td>{p.notes}</Td>
+              <Td><GhostBtn onClick={() => delPay(p.id)} style={{ color: "#c0392b" }}><Trash2 size={13} /></GhostBtn></Td>
+            </tr>
+          ))}
+          {payments.length === 0 && <EmptyRow colSpan={6} text="لا توجد مرتبات مصروفة بعد" />}
+        </tbody>
+      </table>
+    </Card>
+
+    {empForm && <Modal onClose={() => setEmpForm(null)} title={empForm.id ? "تعديل موظف" : "موظف جديد"}>
+      <div style={{ display: "grid", gap: 10 }}>
+        <Field label="الاسم"><Input required value={empForm.name} onChange={e => setEmpForm({ ...empForm, name: e.target.value })} /></Field>
+        <Field label="الوظيفة"><Input value={empForm.role} onChange={e => setEmpForm({ ...empForm, role: e.target.value })} /></Field>
+        <Field label="الهاتف"><Input value={empForm.phone} onChange={e => setEmpForm({ ...empForm, phone: e.target.value })} /></Field>
+        <Field label="الراتب الشهري"><Input type="number" value={empForm.monthly_salary} onChange={e => setEmpForm({ ...empForm, monthly_salary: e.target.value })} /></Field>
+        <PrimaryBtn onClick={saveEmp} style={{ justifyContent: "center", marginTop: 6 }}><Save size={15} /> حفظ</PrimaryBtn>
+      </div>
+    </Modal>}
+
+    {payForm && <Modal onClose={() => setPayForm(null)} title="صرف راتب">
+      <div style={{ display: "grid", gap: 10 }}>
+        <Field label="الموظف">
+          <Select value={payForm.employeeId} onChange={e => setPayForm({ ...payForm, employeeId: e.target.value })}>
+            {employees.map(e => <option key={e.id} value={e.id}>{e.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="التاريخ"><Input type="date" required value={payForm.date} onChange={e => setPayForm({ ...payForm, date: e.target.value })} /></Field>
+        <Field label="عن شهر"><Input placeholder="مثال: أغسطس 2026" value={payForm.month} onChange={e => setPayForm({ ...payForm, month: e.target.value })} /></Field>
+        <Field label="القيمة"><Input type="number" required value={payForm.amount} onChange={e => setPayForm({ ...payForm, amount: e.target.value })} /></Field>
+        <Field label="ملاحظات"><Input value={payForm.notes} onChange={e => setPayForm({ ...payForm, notes: e.target.value })} /></Field>
+        <PrimaryBtn onClick={savePay} style={{ justifyContent: "center", marginTop: 6 }}><Save size={15} /> حفظ</PrimaryBtn>
+      </div>
+    </Modal>}
+  </div>;
+}
+
+// ================= OWNER SETTLEMENT =================
+function SettlementView({ session, data, reload }) {
+  const [form, setForm] = useState(null);
+  const [err, setErr] = useState("");
+
+  const totalRevenue = data.sales.reduce((a, s) => a + Number(s.total), 0);
+  const totalCost = data.sales.flatMap(s => s.items || []).reduce((a, i) => {
+    const prod = data.products.find(p => p.id === i.productId);
+    return a + (prod ? Number(prod.cost) * Number(i.qty) : 0);
+  }, 0);
+  const totalExpenses = data.expenses.reduce((a, e) => a + Number(e.amount || 0), 0);
+  const totalSalaries = (data.salaryPayments || []).reduce((a, p) => a + Number(p.amount || 0), 0);
+  const netProfit = totalRevenue - totalCost - totalExpenses - totalSalaries;
+  const settlements = data.settlements || [];
+  const totalDistributed = settlements.reduce((a, s) => a + Number(s.amount || 0), 0);
+  const remaining = netProfit - totalDistributed;
+
+  const save = async () => {
+    setErr("");
+    try {
+      await insert("settlements", session.token, { date: form.date, partner_name: form.partnerName, amount: Number(form.amount) || 0, notes: form.notes });
+      setForm(null); reload();
+    } catch (e2) { setErr(e2.message); }
+  };
+  const del = async (id) => { try { await remove("settlements", session.token, id); reload(); } catch (e) { setErr(e.message); } };
+
+  return <div>
+    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ date: today(), partnerName: "", amount: "", notes: "" })}><Plus size={15} /> تسجيل تصفية</PrimaryBtn>}>تصفية صاحب المشروع</SectionTitle>
+    <ErrBanner err={err} />
+    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 18 }}>
+      <StatCard label="صافي الربح التقريبي (بعد المصروفات والرواتب)" value={fmt(netProfit)} color={netProfit >= 0 ? "#1a7f37" : "#c0392b"} />
+      <StatCard label="إجمالي الموزّع على الشركاء" value={fmt(totalDistributed)} color="#b8860b" />
+      <StatCard label="المتبقي غير موزّع" value={fmt(remaining)} color={remaining >= 0 ? "#1b1b1f" : "#c0392b"} />
+    </div>
+    <Card style={{ overflow: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
+        <thead><tr><Th>التاريخ</Th><Th>الشريك</Th><Th>القيمة</Th><Th>ملاحظات</Th><Th></Th></tr></thead>
+        <tbody>
+          {settlements.map(s => (
+            <tr key={s.id}>
+              <Td>{s.date}</Td><Td style={{ fontWeight: 600 }}>{s.partner_name}</Td><Td style={{ fontWeight: 700 }}>{fmt(s.amount)}</Td><Td>{s.notes}</Td>
+              <Td><GhostBtn onClick={() => del(s.id)} style={{ color: "#c0392b" }}><Trash2 size={13} /></GhostBtn></Td>
+            </tr>
+          ))}
+          {settlements.length === 0 && <EmptyRow colSpan={5} text="لا توجد عمليات تصفية مسجّلة بعد" />}
+        </tbody>
+      </table>
+    </Card>
+    {form && <Modal onClose={() => setForm(null)} title="تسجيل عملية تصفية">
+      <div style={{ display: "grid", gap: 10 }}>
+        <Field label="التاريخ"><Input type="date" required value={form.date} onChange={e => setForm({ ...form, date: e.target.value })} /></Field>
+        <Field label="اسم الشريك"><Input required value={form.partnerName} onChange={e => setForm({ ...form, partnerName: e.target.value })} /></Field>
+        <Field label="القيمة"><Input type="number" required value={form.amount} onChange={e => setForm({ ...form, amount: e.target.value })} /></Field>
+        <Field label="ملاحظات"><Input value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} /></Field>
+        <PrimaryBtn onClick={save} style={{ justifyContent: "center", marginTop: 6 }}><Save size={15} /> حفظ</PrimaryBtn>
+      </div>
+    </Modal>}
+  </div>;
+}
+
 function SettingsView({ session, data, reload }) {
   const [season, setSeason] = useState(data.season);
   const [err, setErr] = useState("");
