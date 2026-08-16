@@ -48,6 +48,30 @@ async function login(email, password) {
   return json;
 }
 
+async function requestPasswordReset(email) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/recover`, {
+    method: "POST",
+    headers: { apikey: ANON_KEY, "Content-Type": "application/json" },
+    body: JSON.stringify({ email, options: { redirect_to: window.location.origin } }),
+  });
+  if (!res.ok) {
+    let msg = "تعذّر إرسال رابط إعادة التعيين";
+    try { const j = await res.json(); msg = j.error_description || j.msg || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+}
+
+async function updatePassword(token, newPassword) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+    method: "PUT",
+    headers: { apikey: ANON_KEY, Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ password: newPassword }),
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json.error_description || json.msg || "تعذّر تغيير كلمة المرور");
+  return json;
+}
+
 const T = { list: "*", // helper unused
 };
 
@@ -69,26 +93,34 @@ const LOGO_DATA_URI = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAA
 // ============================================================
 export default function FactoryERP() {
   const [session, setSession] = useState(undefined); // undefined = loading, null = logged out
+  const [recoveryToken, setRecoveryToken] = useState(null);
 
   useEffect(() => {
-    (async () => {
-      try {
-        const res = await window.storage.get(SESSION_KEY, false);
-        if (res && res.value) setSession(JSON.parse(res.value));
-        else setSession(null);
-      } catch (e) { setSession(null); }
-    })();
+    // اكتشاف رابط إعادة تعيين كلمة المرور القادم من الإيميل
+    const hash = window.location.hash;
+    if (hash && hash.includes("type=recovery")) {
+      const params = new URLSearchParams(hash.replace("#", "?"));
+      const at = params.get("access_token");
+      if (at) { setRecoveryToken(at); return; }
+    }
+    try {
+      const raw = localStorage.getItem(SESSION_KEY);
+      setSession(raw ? JSON.parse(raw) : null);
+    } catch (e) { setSession(null); }
   }, []);
 
-  const handleLogin = async (sess) => {
+  const handleLogin = (sess) => {
     setSession(sess);
-    try { await window.storage.set(SESSION_KEY, JSON.stringify(sess), false); } catch (e) {}
+    try { localStorage.setItem(SESSION_KEY, JSON.stringify(sess)); } catch (e) {}
   };
-  const handleLogout = async () => {
+  const handleLogout = () => {
     setSession(null);
-    try { await window.storage.delete(SESSION_KEY, false); } catch (e) {}
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
   };
 
+  if (recoveryToken) {
+    return <ResetPasswordScreen token={recoveryToken} onDone={() => { setRecoveryToken(null); window.location.hash = ""; setSession(null); }} />;
+  }
   if (session === undefined) return <CenterMsg>جارِ التحميل...</CenterMsg>;
   if (!session) return <LoginScreen onLogin={handleLogin} />;
   if (session.role === "sales_only") return <POSOnlyApp session={session} onLogout={handleLogout} />;
@@ -100,6 +132,49 @@ function CenterMsg({ children }) {
 }
 
 // ============================================================
+// RESET PASSWORD (from email link)
+// ============================================================
+function ResetPasswordScreen({ token, onDone }) {
+  const [pw1, setPw1] = useState("");
+  const [pw2, setPw2] = useState("");
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    setErr(""); setMsg("");
+    if (pw1.length < 6) { setErr("كلمة المرور يجب أن تكون 6 حروف/أرقام على الأقل"); return; }
+    if (pw1 !== pw2) { setErr("كلمتا المرور غير متطابقتين"); return; }
+    setBusy(true);
+    try {
+      await updatePassword(token, pw1);
+      setMsg("تم تغيير كلمة المرور بنجاح، تقدر تسجّل دخول بيها دلوقتي.");
+      setTimeout(onDone, 2000);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  return (
+    <div dir="rtl" style={{ minHeight: "100vh", background: "#111115", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI', Tahoma, Arial, sans-serif", padding: 16 }}>
+      <div style={{ background: "#fff", borderRadius: 18, padding: 30, width: "100%", maxWidth: 360 }}>
+        <div style={{ textAlign: "center", marginBottom: 20 }}>
+          <img src={LOGO_DATA_URI} alt="4Brothers" style={{ width: 72, height: 72, margin: "0 auto 10px", borderRadius: 14, objectFit: "cover", border: `2px solid ${ACCENT}` }} />
+          <h1 style={{ fontSize: 17, margin: 0, fontWeight: 800 }}>تعيين كلمة مرور جديدة</h1>
+        </div>
+        <div onKeyDown={e => { if (e.key === "Enter") submit(); }} style={{ display: "grid", gap: 12 }}>
+          <Field label="كلمة المرور الجديدة"><Input type="password" value={pw1} onChange={e => setPw1(e.target.value)} /></Field>
+          <Field label="تأكيد كلمة المرور"><Input type="password" value={pw2} onChange={e => setPw2(e.target.value)} /></Field>
+          {err && <div style={{ color: "#c0392b", fontSize: 12.5 }}>{err}</div>}
+          {msg && <div style={{ color: "#1a7f37", fontSize: 12.5 }}>{msg}</div>}
+          <PrimaryBtn onClick={submit} disabled={busy} style={{ justifyContent: "center", marginTop: 4 }}>
+            <Lock size={15} /> {busy ? "جارِ الحفظ..." : "حفظ كلمة المرور"}
+          </PrimaryBtn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // LOGIN
 // ============================================================
 function LoginScreen({ onLogin }) {
@@ -107,6 +182,8 @@ function LoginScreen({ onLogin }) {
   const [password, setPassword] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState("login"); // login | forgot
+  const [forgotMsg, setForgotMsg] = useState("");
 
   const submit = async () => {
     setErr(""); setBusy(true);
@@ -120,22 +197,48 @@ function LoginScreen({ onLogin }) {
     } finally { setBusy(false); }
   };
 
+  const submitForgot = async () => {
+    setErr(""); setForgotMsg(""); setBusy(true);
+    try {
+      await requestPasswordReset(email.trim());
+      setForgotMsg("تم إرسال رابط إعادة تعيين كلمة المرور على إيميلك. افتح الإيميل ودوس على الرابط.");
+    } catch (e2) { setErr(e2.message); } finally { setBusy(false); }
+  };
+
   return (
     <div dir="rtl" style={{ minHeight: "100vh", background: "#111115", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Segoe UI', Tahoma, Arial, sans-serif", padding: 16 }}>
       <div style={{ background: "#fff", borderRadius: 18, padding: 30, width: "100%", maxWidth: 360 }}>
         <div style={{ textAlign: "center", marginBottom: 20 }}>
           <img src={LOGO_DATA_URI} alt="4Brothers" style={{ width: 72, height: 72, margin: "0 auto 10px", borderRadius: 14, objectFit: "cover", border: `2px solid ${ACCENT}` }} />
           <h1 style={{ fontSize: 17, margin: 0, fontWeight: 800 }}>نظام إدارة المصنع</h1>
-          <p style={{ fontSize: 12.5, color: "#8a8a92", marginTop: 4 }}>سجّل الدخول بحسابك</p>
+          <p style={{ fontSize: 12.5, color: "#8a8a92", marginTop: 4 }}>{mode === "login" ? "سجّل الدخول بحسابك" : "استرجاع كلمة المرور"}</p>
         </div>
-        <div onKeyDown={e => { if (e.key === "Enter") submit(); }} style={{ display: "grid", gap: 12 }}>
-          <Field label="البريد الإلكتروني"><Input type="email" required value={email} onChange={e => setEmail(e.target.value)} /></Field>
-          <Field label="كلمة المرور"><Input type="password" required value={password} onChange={e => setPassword(e.target.value)} /></Field>
-          {err && <div style={{ color: "#c0392b", fontSize: 12.5, display: "flex", gap: 6, alignItems: "center" }}><AlertCircle size={14} />{err}</div>}
-          <PrimaryBtn onClick={submit} disabled={busy} style={{ justifyContent: "center", marginTop: 4 }}>
-            <Lock size={15} /> {busy ? "جارِ الدخول..." : "دخول"}
-          </PrimaryBtn>
-        </div>
+
+        {mode === "login" ? (
+          <div onKeyDown={e => { if (e.key === "Enter") submit(); }} style={{ display: "grid", gap: 12 }}>
+            <Field label="البريد الإلكتروني"><Input type="email" required value={email} onChange={e => setEmail(e.target.value)} /></Field>
+            <Field label="كلمة المرور"><Input type="password" required value={password} onChange={e => setPassword(e.target.value)} /></Field>
+            {err && <div style={{ color: "#c0392b", fontSize: 12.5, display: "flex", gap: 6, alignItems: "center" }}><AlertCircle size={14} />{err}</div>}
+            <PrimaryBtn onClick={submit} disabled={busy} style={{ justifyContent: "center", marginTop: 4 }}>
+              <Lock size={15} /> {busy ? "جارِ الدخول..." : "دخول"}
+            </PrimaryBtn>
+            <button onClick={() => { setMode("forgot"); setErr(""); setForgotMsg(""); }} style={{ background: "transparent", border: "none", color: "#8a8a92", fontSize: 12.5, cursor: "pointer", textDecoration: "underline" }}>
+              نسيت كلمة المرور؟
+            </button>
+          </div>
+        ) : (
+          <div onKeyDown={e => { if (e.key === "Enter") submitForgot(); }} style={{ display: "grid", gap: 12 }}>
+            <Field label="البريد الإلكتروني"><Input type="email" required value={email} onChange={e => setEmail(e.target.value)} /></Field>
+            {err && <div style={{ color: "#c0392b", fontSize: 12.5 }}>{err}</div>}
+            {forgotMsg && <div style={{ color: "#1a7f37", fontSize: 12.5 }}>{forgotMsg}</div>}
+            <PrimaryBtn onClick={submitForgot} disabled={busy} style={{ justifyContent: "center", marginTop: 4 }}>
+              {busy ? "جارِ الإرسال..." : "إرسال رابط إعادة التعيين"}
+            </PrimaryBtn>
+            <button onClick={() => { setMode("login"); setErr(""); setForgotMsg(""); }} style={{ background: "transparent", border: "none", color: "#8a8a92", fontSize: 12.5, cursor: "pointer", textDecoration: "underline" }}>
+              الرجوع لتسجيل الدخول
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -157,12 +260,13 @@ function POSOnlyApp({ session, onLogout }) {
   const [sessionTotal, setSessionTotal] = useState(0);
   const [sessionCount, setSessionCount] = useState(0);
   const [barcodeInput, setBarcodeInput] = useState("");
+  const [receipt, setReceipt] = useState(null);
 
   const loadAll = useCallback(async () => {
     try {
       const [p, c] = await Promise.all([
         rpc("pos_products", session.token, {}),
-        apiRequest(`/rest/v1/customers?select=id,name&order=name.asc`, { token: session.token }),
+        apiRequest(`/rest/v1/customers?select=id,name,type&order=name.asc`, { token: session.token }),
       ]);
       setProducts(p || []);
       setCustomers(c || []);
@@ -172,16 +276,33 @@ function POSOnlyApp({ session, onLogout }) {
 
   useEffect(() => { loadAll(); }, [loadAll]);
 
+  const priceFor = useCallback((prod, custId) => {
+    const cust = (customers || []).find(c => c.id === custId);
+    if (cust && cust.type === "مخزن" && prod.wholesale_price) return Number(prod.wholesale_price);
+    return Number(prod.price);
+  }, [customers]);
+
+  // إعادة حساب أسعار السلة تلقائيًا لو اتغيّر العميل
+  useEffect(() => {
+    if (!products) return;
+    setCart(c => c.map(i => {
+      const prod = products.find(p => p.id === i.productId);
+      return prod ? { ...i, price: priceFor(prod, customerId) } : i;
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerId]);
+
   if (products === null || customers === null) return <CenterMsg>جارِ التحميل...</CenterMsg>;
 
   const total = cart.reduce((a, i) => a + i.qty * i.price, 0);
 
   const addProductToCart = (prod) => {
     if (!prod) return;
+    const price = priceFor(prod, customerId);
     setCart(c => {
       const existing = c.find(i => i.productId === prod.id);
       if (existing) return c.map(i => i.productId === prod.id ? { ...i, qty: i.qty + 1 } : i);
-      return [...c, { productId: prod.id, name: prod.name, qty: 1, price: prod.price, maxStock: prod.stock }];
+      return [...c, { productId: prod.id, name: prod.name, qty: 1, price, maxStock: prod.stock }];
     });
   };
   const addItem = () => addProductToCart(products.find(p => p.id === pick));
@@ -202,7 +323,7 @@ function POSOnlyApp({ session, onLogout }) {
     setBusy(true); setErr(""); setMsg("");
     try {
       const paidAmt = Number(paid) || 0;
-      await rpc("create_sale", session.token, {
+      const saleId = await rpc("create_sale", session.token, {
         p_customer_id: customerId,
         p_items: cart.map(({ productId, qty, price }) => ({ productId, qty, price })),
         p_total: total,
@@ -211,6 +332,10 @@ function POSOnlyApp({ session, onLogout }) {
       setSessionTotal(t => t + total);
       setSessionCount(c => c + 1);
       setMsg("تم تسجيل الفاتورة بنجاح ✅");
+      setReceipt({
+        id: saleId, date: today(), customerName: customers.find(c => c.id === customerId)?.name || "-",
+        items: cart, total, paid: paidAmt,
+      });
       setCart([]); setPaid("");
       loadAll();
       setTimeout(() => setMsg(""), 3000);
@@ -270,9 +395,12 @@ function POSOnlyApp({ session, onLogout }) {
           <SectionTitle>إتمام الفاتورة</SectionTitle>
           <Field label="العميل">
             <Select value={customerId} onChange={e => setCustomerId(e.target.value)}>
-              {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              {customers.map(c => <option key={c.id} value={c.id}>{c.name}{c.type === "مخزن" ? " (مخزن)" : ""}</option>)}
             </Select>
           </Field>
+          {customers.find(c => c.id === customerId)?.type === "مخزن" && (
+            <div style={{ fontSize: 12, color: "#b8860b", marginTop: 6 }}>سيتم استخدام سعر المخازن تلقائيًا للأصناف المتاح لها سعر جملة.</div>
+          )}
           <div style={{ display: "flex", justifyContent: "space-between", margin: "14px 0 6px", fontSize: 15 }}>
             <span>الإجمالي</span><strong>{fmt(total)} ج</strong>
           </div>
@@ -282,6 +410,7 @@ function POSOnlyApp({ session, onLogout }) {
           </PrimaryBtn>
         </Card>
       </div>
+      {receipt && <ReceiptModal receipt={receipt} onClose={() => setReceipt(null)} />}
     </div>
   );
 }
@@ -464,6 +593,68 @@ function Field({ label, children }) {
 }
 function ErrBanner({ err }) { if (!err) return null; return <div style={{ background: "#fdecea", color: "#c0392b", padding: "10px 14px", borderRadius: 10, marginBottom: 14, fontSize: 13.5 }}>{err}</div>; }
 
+// ================= RECEIPT / PRINTABLE INVOICE =================
+function ReceiptModal({ receipt, onClose }) {
+  const ref = "INV-" + (receipt.id ? String(receipt.id).slice(0, 8).toUpperCase() : "");
+  const remaining = receipt.total - receipt.paid;
+  const doPrint = () => window.print();
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(10,10,12,.6)", zIndex: 60, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }} className="receipt-overlay">
+      <div style={{ background: "#fff", borderRadius: 16, width: "100%", maxWidth: 420, maxHeight: "92vh", overflowY: "auto" }}>
+        <div id="print-area" style={{ padding: 24 }} dir="rtl">
+          <div style={{ textAlign: "center", marginBottom: 14 }}>
+            <img src={LOGO_DATA_URI} alt="4Brothers" style={{ width: 56, height: 56, borderRadius: 12, margin: "0 auto 8px" }} />
+            <div style={{ fontWeight: 800, fontSize: 15 }}>مصنع 4Brothers</div>
+            <div style={{ fontSize: 11, color: "#8a8a92" }}>فاتورة بيع</div>
+          </div>
+          <div style={{ fontSize: 12.5, marginBottom: 10, display: "flex", justifyContent: "space-between", color: "#555" }}>
+            <span>{ref}</span><span>{receipt.date}</span>
+          </div>
+          <div style={{ fontSize: 13, marginBottom: 12 }}><strong>العميل:</strong> {receipt.customerName}</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5, marginBottom: 12 }}>
+            <thead><tr style={{ borderBottom: "1px solid #ddd" }}>
+              <th style={{ textAlign: "right", padding: "6px 2px" }}>الصنف</th>
+              <th style={{ textAlign: "center", padding: "6px 2px" }}>كمية</th>
+              <th style={{ textAlign: "left", padding: "6px 2px" }}>سعر</th>
+              <th style={{ textAlign: "left", padding: "6px 2px" }}>إجمالي</th>
+            </tr></thead>
+            <tbody>
+              {receipt.items.map((i, idx) => (
+                <tr key={idx} style={{ borderBottom: "1px solid #f2f2f4" }}>
+                  <td style={{ padding: "6px 2px" }}>{i.name}</td>
+                  <td style={{ padding: "6px 2px", textAlign: "center" }}>{i.qty}</td>
+                  <td style={{ padding: "6px 2px", textAlign: "left" }}>{fmt(i.price)}</td>
+                  <td style={{ padding: "6px 2px", textAlign: "left" }}>{fmt(i.qty * i.price)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ borderTop: "1px dashed #ccc", paddingTop: 10, fontSize: 13 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", fontWeight: 800, fontSize: 15 }}><span>الإجمالي</span><span>{fmt(receipt.total)} ج</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4 }}><span>المدفوع</span><span>{fmt(receipt.paid)} ج</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, color: remaining > 0 ? "#c0392b" : "#1a7f37" }}><span>المتبقي</span><span>{fmt(remaining)} ج</span></div>
+          </div>
+          <div style={{ textAlign: "center", marginTop: 16, fontSize: 11, color: "#a0a0a8" }}>شكرًا لتعاملكم معنا</div>
+        </div>
+        <div className="receipt-actions" style={{ display: "flex", gap: 8, padding: "0 24px 20px" }}>
+          <PrimaryBtn onClick={doPrint} style={{ flex: 1, justifyContent: "center" }}>طباعة / حفظ PDF</PrimaryBtn>
+          <GhostBtn onClick={onClose} style={{ flex: 1, justifyContent: "center" }}>إغلاق</GhostBtn>
+        </div>
+      </div>
+      <style>{`
+        @media print {
+          body * { visibility: hidden; }
+          #print-area, #print-area * { visibility: visible; }
+          #print-area { position: fixed; top: 0; right: 0; width: 100%; }
+          .receipt-actions { display: none !important; }
+          .receipt-overlay { position: static !important; background: none !important; }
+        }
+      `}</style>
+    </div>
+  );
+}
+
 // ================= HOME =================
 function HomeView({ data, setView }) {
   const totalSales = data.sales.reduce((a, s) => a + Number(s.total), 0);
@@ -522,7 +713,7 @@ function ProductsView({ session, data, reload }) {
   const save = async () => {
     setErr("");
     try {
-      const payload = { name: form.name, sku: form.sku, barcode: form.barcode || null, category: form.category, cost: Number(form.cost), price: Number(form.price), stock: Number(form.stock), unit: form.unit };
+      const payload = { name: form.name, sku: form.sku, barcode: form.barcode || null, category: form.category, cost: Number(form.cost), price: Number(form.price), wholesale_price: form.wholesale_price ? Number(form.wholesale_price) : null, stock: Number(form.stock), unit: form.unit };
       if (form.id) await update("products", session.token, form.id, payload);
       else await insert("products", session.token, payload);
       setForm(null); reload();
@@ -531,7 +722,7 @@ function ProductsView({ session, data, reload }) {
   const del = async (id) => { try { await remove("products", session.token, id); reload(); } catch (e) { setErr(e.message); } };
 
   return <div>
-    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ name: "", sku: "", barcode: "", category: "", cost: "", price: "", stock: "", unit: "قطعة" })}><Plus size={15} /> منتج جديد</PrimaryBtn>}>المنتجات والمخزون</SectionTitle>
+    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ name: "", sku: "", barcode: "", category: "", cost: "", price: "", wholesale_price: "", stock: "", unit: "قطعة" })}><Plus size={15} /> منتج جديد</PrimaryBtn>}>المنتجات والمخزون</SectionTitle>
     <ErrBanner err={err} />
     <div style={{ marginBottom: 12, maxWidth: 320 }}>
       <div style={{ position: "relative" }}>
@@ -540,21 +731,21 @@ function ProductsView({ session, data, reload }) {
       </div>
     </div>
     <Card style={{ overflow: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
-        <thead><tr><Th>الاسم</Th><Th>الكود</Th><Th>الفئة</Th><Th>التكلفة</Th><Th>سعر البيع</Th><Th>المخزون</Th><Th></Th></tr></thead>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 780 }}>
+        <thead><tr><Th>الاسم</Th><Th>الكود</Th><Th>الفئة</Th><Th>التكلفة</Th><Th>سعر البيع</Th><Th>سعر المخازن</Th><Th>المخزون</Th><Th></Th></tr></thead>
         <tbody>
           {filtered.map(p => (
             <tr key={p.id}>
               <Td style={{ fontWeight: 600 }}>{p.name}</Td><Td>{p.sku}</Td><Td>{p.category}</Td>
-              <Td>{fmt(p.cost)}</Td><Td>{fmt(p.price)}</Td>
+              <Td>{fmt(p.cost)}</Td><Td>{fmt(p.price)}</Td><Td>{p.wholesale_price ? fmt(p.wholesale_price) : "—"}</Td>
               <Td><span style={{ color: p.stock <= 10 ? "#c0392b" : "#1a7f37", fontWeight: 700 }}>{p.stock} {p.unit}</span></Td>
               <Td><div style={{ display: "flex", gap: 6 }}>
-                <GhostBtn onClick={() => setForm(p)}><Edit2 size={13} /></GhostBtn>
+                <GhostBtn onClick={() => setForm({ ...p, wholesale_price: p.wholesale_price || "" })}><Edit2 size={13} /></GhostBtn>
                 <GhostBtn onClick={() => del(p.id)} style={{ color: "#c0392b" }}><Trash2 size={13} /></GhostBtn>
               </div></Td>
             </tr>
           ))}
-          {filtered.length === 0 && <EmptyRow colSpan={7} text="لا توجد منتجات" />}
+          {filtered.length === 0 && <EmptyRow colSpan={8} text="لا توجد منتجات" />}
         </tbody>
       </table>
     </Card>
@@ -568,6 +759,7 @@ function ProductsView({ session, data, reload }) {
           <Field label="التكلفة"><Input type="number" required value={form.cost} onChange={e => setForm({ ...form, cost: e.target.value })} /></Field>
           <Field label="سعر البيع"><Input type="number" required value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} /></Field>
         </div>
+        <Field label="سعر البيع للمخازن (اختياري)"><Input type="number" value={form.wholesale_price || ""} onChange={e => setForm({ ...form, wholesale_price: e.target.value })} placeholder="يُستخدم تلقائيًا مع عملاء نوعهم مخزن" /></Field>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
           <Field label="الكمية بالمخزون"><Input type="number" required value={form.stock} onChange={e => setForm({ ...form, stock: e.target.value })} /></Field>
           <Field label="الوحدة"><Input value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })} /></Field>
@@ -587,14 +779,30 @@ function POSView({ session, data, reload }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [barcodeInput, setBarcodeInput] = useState("");
+  const [receipt, setReceipt] = useState(null);
   const total = cart.reduce((a, i) => a + i.qty * i.price, 0);
+
+  const priceFor = (prod, custId) => {
+    const cust = data.customers.find(c => c.id === custId);
+    if (cust && cust.type === "مخزن" && prod.wholesale_price) return Number(prod.wholesale_price);
+    return Number(prod.price);
+  };
+
+  useEffect(() => {
+    setCart(c => c.map(i => {
+      const prod = data.products.find(p => p.id === i.productId);
+      return prod ? { ...i, price: priceFor(prod, customerId) } : i;
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [customerId]);
 
   const addProductToCart = (prod) => {
     if (!prod) return;
+    const price = priceFor(prod, customerId);
     setCart(c => {
       const existing = c.find(i => i.productId === prod.id);
       if (existing) return c.map(i => i.productId === prod.id ? { ...i, qty: i.qty + 1 } : i);
-      return [...c, { productId: prod.id, name: prod.name, qty: 1, price: prod.price }];
+      return [...c, { productId: prod.id, name: prod.name, qty: 1, price }];
     });
   };
   const addItem = () => addProductToCart(data.products.find(p => p.id === pick));
@@ -614,10 +822,14 @@ function POSView({ session, data, reload }) {
     if (cart.length === 0) return;
     setBusy(true); setErr("");
     try {
-      await rpc("create_sale", session.token, {
+      const saleId = await rpc("create_sale", session.token, {
         p_customer_id: customerId,
         p_items: cart.map(({ productId, qty, price }) => ({ productId, qty, price })),
         p_total: total, p_paid: Number(paid) || 0,
+      });
+      setReceipt({
+        id: saleId, date: today(), customerName: data.customers.find(c => c.id === customerId)?.name || "-",
+        items: cart, total, paid: Number(paid) || 0,
       });
       setCart([]); setPaid(""); reload();
     } catch (e) { setErr(e.message); } finally { setBusy(false); }
@@ -657,12 +869,16 @@ function POSView({ session, data, reload }) {
     <Card style={{ padding: 16, flex: "1 1 260px", alignSelf: "flex-start" }}>
       <SectionTitle>الفاتورة</SectionTitle>
       <Field label="العميل"><Select value={customerId} onChange={e => setCustomerId(e.target.value)}>
-        {data.customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        {data.customers.map(c => <option key={c.id} value={c.id}>{c.name}{c.type === "مخزن" ? " (مخزن)" : ""}</option>)}
       </Select></Field>
+      {data.customers.find(c => c.id === customerId)?.type === "مخزن" && (
+        <div style={{ fontSize: 12, color: "#b8860b", marginTop: 6 }}>سيتم استخدام سعر المخازن تلقائيًا للأصناف المتاح لها سعر جملة.</div>
+      )}
       <div style={{ display: "flex", justifyContent: "space-between", margin: "14px 0 6px", fontSize: 15 }}><span>الإجمالي</span><strong>{fmt(total)} ج</strong></div>
       <Field label="المبلغ المدفوع"><Input type="number" value={paid} onChange={e => setPaid(e.target.value)} placeholder={String(total)} /></Field>
       <PrimaryBtn onClick={checkout} disabled={busy} style={{ justifyContent: "center", width: "100%", marginTop: 12 }}><Save size={15} /> {busy ? "جارِ الحفظ..." : "إتمام البيع"}</PrimaryBtn>
     </Card>
+    {receipt && <ReceiptModal receipt={receipt} onClose={() => setReceipt(null)} />}
   </div>;
 }
 
@@ -692,7 +908,7 @@ function CustomersView({ session, data, reload }) {
   const save = async () => {
     setErr("");
     try {
-      const payload = { name: form.name, phone: form.phone, address: form.address };
+      const payload = { name: form.name, phone: form.phone, address: form.address, type: form.type || "عادي" };
       if (form.id) await update("customers", session.token, form.id, payload);
       else await insert("customers", session.token, payload);
       setForm(null); reload();
@@ -701,23 +917,25 @@ function CustomersView({ session, data, reload }) {
   const del = async (id) => { try { await remove("customers", session.token, id); reload(); } catch (e) { setErr(e.message); } };
 
   return <div>
-    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ name: "", phone: "", address: "" })}><Plus size={15} /> عميل جديد</PrimaryBtn>}>العملاء</SectionTitle>
+    <SectionTitle action={<PrimaryBtn onClick={() => setForm({ name: "", phone: "", address: "", type: "عادي" })}><Plus size={15} /> عميل جديد</PrimaryBtn>}>العملاء</SectionTitle>
     <ErrBanner err={err} />
     <Card style={{ overflow: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
-        <thead><tr><Th>الاسم</Th><Th>الهاتف</Th><Th>العنوان</Th><Th>إجمالي المشتريات</Th><Th></Th></tr></thead>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 650 }}>
+        <thead><tr><Th>الاسم</Th><Th>النوع</Th><Th>الهاتف</Th><Th>العنوان</Th><Th>إجمالي المشتريات</Th><Th></Th></tr></thead>
         <tbody>
           {data.customers.map(c => {
             const totalBuy = data.sales.filter(s => s.customer_id === c.id).reduce((a, s) => a + Number(s.total), 0);
             return <tr key={c.id}>
-              <Td style={{ fontWeight: 600 }}>{c.name}</Td><Td>{c.phone}</Td><Td>{c.address}</Td><Td>{fmt(totalBuy)}</Td>
+              <Td style={{ fontWeight: 600 }}>{c.name}</Td>
+              <Td><span style={{ color: c.type === "مخزن" ? "#b8860b" : "#8a8a92", fontWeight: 700 }}>{c.type || "عادي"}</span></Td>
+              <Td>{c.phone}</Td><Td>{c.address}</Td><Td>{fmt(totalBuy)}</Td>
               <Td><div style={{ display: "flex", gap: 6 }}>
-                <GhostBtn onClick={() => setForm(c)}><Edit2 size={13} /></GhostBtn>
+                <GhostBtn onClick={() => setForm({ ...c, type: c.type || "عادي" })}><Edit2 size={13} /></GhostBtn>
                 <GhostBtn onClick={() => del(c.id)} style={{ color: "#c0392b" }}><Trash2 size={13} /></GhostBtn>
               </div></Td>
             </tr>;
           })}
-          {data.customers.length === 0 && <EmptyRow colSpan={5} text="لا يوجد عملاء" />}
+          {data.customers.length === 0 && <EmptyRow colSpan={6} text="لا يوجد عملاء" />}
         </tbody>
       </table>
     </Card>
@@ -726,6 +944,12 @@ function CustomersView({ session, data, reload }) {
         <Field label="الاسم"><Input required value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></Field>
         <Field label="الهاتف"><Input value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></Field>
         <Field label="العنوان"><Input value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} /></Field>
+        <Field label="نوع العميل">
+          <Select value={form.type || "عادي"} onChange={e => setForm({ ...form, type: e.target.value })}>
+            <option value="عادي">عادي</option>
+            <option value="مخزن">مخزن (سعر جملة)</option>
+          </Select>
+        </Field>
         <PrimaryBtn onClick={save} style={{ justifyContent: "center", marginTop: 6 }}><Save size={15} /> حفظ</PrimaryBtn>
       </div>
     </Modal>}
