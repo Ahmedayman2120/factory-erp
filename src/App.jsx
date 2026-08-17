@@ -82,6 +82,10 @@ const remove = (table, token, id) => apiRequest(`/rest/v1/${table}?id=eq.${id}`,
 const rpc = (fn, token, args) => apiRequest(`/rest/v1/rpc/${fn}`, { method: "POST", token, body: args });
 
 function uid() { return Math.random().toString(36).slice(2, 10); }
+function isAuthError(e) {
+  const m = (e && e.message || "").toLowerCase();
+  return e?.status === 401 || m.includes("jwt") || m.includes("token") || m.includes("expired");
+}
 function fmt(n) { return (Number(n) || 0).toLocaleString("ar-EG", { maximumFractionDigits: 2 }); }
 function today() { return new Date().toISOString().slice(0, 10); }
 
@@ -271,7 +275,10 @@ function POSOnlyApp({ session, onLogout }) {
       setProducts(p || []);
       setCustomers(c || []);
       setCustomerId(c?.[0]?.id || "");
-    } catch (e) { setErr(e.message); }
+    } catch (e) {
+      if (isAuthError(e)) { onLogout(); return; }
+      setErr(e.message);
+    }
   }, [session.token]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -439,6 +446,8 @@ const NAV_SECTIONS = [
     { key: "expenses", label: "المصروفات والمسحوبات", icon: Wallet },
     { key: "reports", label: "التقارير", icon: PieChart },
     { key: "salaries", label: "الرواتب", icon: Wallet },
+    { key: "payroll", label: "مسير الرواتب الشهري", icon: Wallet },
+    { key: "attendance", label: "الحضور والانصراف", icon: Users },
     { key: "settlement", label: "تصفية صاحب المشروع", icon: Coins },
     { key: "settings", label: "الإعدادات", icon: Settings },
   ]},
@@ -452,7 +461,7 @@ function AdminApp({ session, onLogout }) {
 
   const loadAll = useCallback(async () => {
     try {
-      const [products, customers, suppliers, sales, purchases, cutting, shipping, expenses, settings, shippers, employees, salaryPayments, settlements] = await Promise.all([
+      const [products, customers, suppliers, sales, purchases, cutting, shipping, expenses, settings, shippers, employees, salaryPayments, settlements, treasuryAccounts, treasuryMovements, attendance] = await Promise.all([
         list("products", session.token, "select=*&order=name.asc"),
         list("customers", session.token, "select=*&order=name.asc"),
         list("suppliers", session.token, "select=*&order=name.asc"),
@@ -466,9 +475,15 @@ function AdminApp({ session, onLogout }) {
         list("employees", session.token, "select=*&order=name.asc"),
         list("salary_payments", session.token, "select=*&order=date.desc"),
         list("settlements", session.token, "select=*&order=date.desc"),
+        list("treasury_accounts", session.token, "select=*&order=name.asc"),
+        list("treasury_movements", session.token, "select=*&order=date.desc"),
+        list("attendance", session.token, "select=*&order=date.desc"),
       ]);
-      setData({ products, customers, suppliers, sales, purchases, cutting, shipping, expenses, shippers, employees, salaryPayments, settlements, season: settings?.[0]?.season || "-" });
-    } catch (e) { setErr(e.message); }
+      setData({ products, customers, suppliers, sales, purchases, cutting, shipping, expenses, shippers, employees, salaryPayments, settlements, treasuryAccounts, treasuryMovements, attendance, season: settings?.[0]?.season || "-" });
+    } catch (e) {
+      if (isAuthError(e)) { onLogout(); return; }
+      setErr(e.message);
+    }
   }, [session.token]);
 
   useEffect(() => { loadAll(); }, [loadAll]);
@@ -534,6 +549,8 @@ function AdminApp({ session, onLogout }) {
             {view === "expenses" && <ExpensesView {...ctx} />}
             {view === "reports" && <ReportsView {...ctx} />}
             {view === "salaries" && <SalariesView {...ctx} />}
+            {view === "payroll" && <PayrollRunView {...ctx} />}
+            {view === "attendance" && <AttendanceView {...ctx} />}
             {view === "settlement" && <SettlementView {...ctx} />}
             {view === "settings" && <SettingsView {...ctx} />}
           </div>
@@ -1278,7 +1295,7 @@ function ShippersView({ session, data, reload }) {
 }
 
 // ================= TREASURY =================
-function TreasuryView({ data }) {
+function TreasuryView({ session, data, reload }) {
   const totalIn = data.sales.reduce((a, s) => a + Number(s.paid), 0);
   const totalOutPurchases = data.purchases.reduce((a, p) => a + Number(p.paid || 0), 0);
   const totalOutExpenses = data.expenses.reduce((a, e) => a + Number(e.amount || 0), 0);
@@ -1289,13 +1306,98 @@ function TreasuryView({ data }) {
     ...data.expenses.map(e => ({ date: e.date, desc: e.type || "مصروف", amount: Number(e.amount || 0), type: "out" })),
   ].filter(m => m.amount).sort((a, b) => (a.date < b.date ? 1 : -1));
 
+  const [accForm, setAccForm] = useState(null);
+  const [movForm, setMovForm] = useState(null);
+  const [err, setErr] = useState("");
+  const accounts = data.treasuryAccounts || [];
+  const accMovements = data.treasuryMovements || [];
+
+  const accBalance = (accId) => {
+    const acc = accounts.find(a => a.id === accId);
+    if (!acc) return 0;
+    const ins = accMovements.filter(m => m.account_id === accId && m.direction === "in").reduce((a, m) => a + Number(m.amount), 0);
+    const outs = accMovements.filter(m => m.account_id === accId && m.direction === "out").reduce((a, m) => a + Number(m.amount), 0);
+    return Number(acc.opening_balance || 0) + ins - outs;
+  };
+
+  const saveAcc = async () => {
+    setErr("");
+    try {
+      const payload = { name: accForm.name, type: accForm.type, opening_balance: Number(accForm.opening_balance) || 0 };
+      if (accForm.id) await update("treasury_accounts", session.token, accForm.id, payload);
+      else await insert("treasury_accounts", session.token, payload);
+      setAccForm(null); reload();
+    } catch (e) { setErr(e.message); }
+  };
+  const delAcc = async (id) => { try { await remove("treasury_accounts", session.token, id); reload(); } catch (e) { setErr(e.message); } };
+
+  const saveMov = async () => {
+    setErr("");
+    try {
+      await insert("treasury_movements", session.token, { account_id: movForm.accountId, date: movForm.date, direction: movForm.direction, amount: Number(movForm.amount) || 0, description: movForm.description });
+      setMovForm(null); reload();
+    } catch (e) { setErr(e.message); }
+  };
+
   return <div>
     <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 18 }}>
       <StatCard label="إجمالي التحصيلات" value={fmt(totalIn)} color="#1a7f37" />
       <StatCard label="مدفوعات للموردين" value={fmt(totalOutPurchases)} color="#b8860b" />
       <StatCard label="المصروفات" value={fmt(totalOutExpenses)} color="#c0392b" />
-      <StatCard label="رصيد الخزينة" value={fmt(balance)} color="#1b1b1f" />
+      <StatCard label="رصيد الخزينة (تلقائي من المبيعات)" value={fmt(balance)} color="#1b1b1f" />
     </div>
+
+    <ErrBanner err={err} />
+    <SectionTitle action={
+      <div style={{ display: "flex", gap: 8 }}>
+        <GhostBtn onClick={() => setMovForm({ accountId: accounts[0]?.id || "", date: today(), direction: "in", amount: "", description: "" })}><Plus size={13} /> حركة</GhostBtn>
+        <PrimaryBtn onClick={() => setAccForm({ name: "", type: "نقدي", opening_balance: "" })}><Plus size={15} /> حساب جديد</PrimaryBtn>
+      </div>
+    }>الحسابات المتعددة (كاش / فودافون كاش / آجل...)</SectionTitle>
+    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 18 }}>
+      {accounts.map(a => (
+        <StatCard key={a.id} label={`${a.name} (${a.type})`} value={fmt(accBalance(a.id))} color={accBalance(a.id) >= 0 ? "#1a7f37" : "#c0392b"} />
+      ))}
+      {accounts.length === 0 && <div style={{ fontSize: 13, color: "#8a8a92" }}>لا توجد حسابات مضافة بعد — دوس "حساب جديد" لإضافة أول حساب (مثلاً: كاش الخزنة).</div>}
+    </div>
+    {accounts.length > 0 && (
+      <Card style={{ overflow: "auto", marginBottom: 18 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
+          <thead><tr><Th>الحساب</Th><Th>النوع</Th><Th>الرصيد الافتتاحي</Th><Th>الرصيد الحالي</Th><Th></Th></tr></thead>
+          <tbody>
+            {accounts.map(a => (
+              <tr key={a.id}>
+                <Td style={{ fontWeight: 600 }}>{a.name}</Td><Td>{a.type}</Td><Td>{fmt(a.opening_balance)}</Td>
+                <Td style={{ fontWeight: 700 }}>{fmt(accBalance(a.id))}</Td>
+                <Td><div style={{ display: "flex", gap: 6 }}>
+                  <GhostBtn onClick={() => setAccForm(a)}><Edit2 size={13} /></GhostBtn>
+                  <GhostBtn onClick={() => delAcc(a.id)} style={{ color: "#c0392b" }}><Trash2 size={13} /></GhostBtn>
+                </div></Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    )}
+    {accMovements.length > 0 && (
+      <Card style={{ overflow: "auto", marginBottom: 18 }}>
+        <div style={{ padding: "14px 16px 0" }}><strong style={{ fontSize: 14.5 }}>حركات الحسابات</strong></div>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600, marginTop: 8 }}>
+          <thead><tr><Th>التاريخ</Th><Th>الحساب</Th><Th>الحركة</Th><Th>القيمة</Th><Th>بيان</Th></tr></thead>
+          <tbody>
+            {accMovements.map(m => (
+              <tr key={m.id}>
+                <Td>{m.date}</Td><Td>{accounts.find(a => a.id === m.account_id)?.name || "-"}</Td>
+                <Td><span style={{ color: m.direction === "in" ? "#1a7f37" : "#c0392b", fontWeight: 700 }}>{m.direction === "in" ? "إيداع" : "سحب"}</span></Td>
+                <Td style={{ fontWeight: 700 }}>{fmt(m.amount)}</Td><Td>{m.description}</Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+    )}
+
+    <SectionTitle>سجل الحركة العام (تلقائي من المبيعات والمشتريات والمصروفات)</SectionTitle>
     <Card style={{ overflow: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
         <thead><tr><Th>التاريخ</Th><Th>البيان</Th><Th>الحركة</Th><Th>القيمة</Th></tr></thead>
@@ -1309,6 +1411,39 @@ function TreasuryView({ data }) {
         </tbody>
       </table>
     </Card>
+
+    {accForm && <Modal onClose={() => setAccForm(null)} title={accForm.id ? "تعديل حساب" : "حساب جديد"}>
+      <div style={{ display: "grid", gap: 10 }}>
+        <Field label="اسم الحساب"><Input required value={accForm.name} onChange={e => setAccForm({ ...accForm, name: e.target.value })} placeholder="مثال: كاش الخزنة" /></Field>
+        <Field label="النوع">
+          <Select value={accForm.type} onChange={e => setAccForm({ ...accForm, type: e.target.value })}>
+            <option>نقدي</option><option>فودافون كاش</option><option>آجل</option><option>بنك</option><option>أخرى</option>
+          </Select>
+        </Field>
+        <Field label="الرصيد الافتتاحي"><Input type="number" value={accForm.opening_balance} onChange={e => setAccForm({ ...accForm, opening_balance: e.target.value })} /></Field>
+        <PrimaryBtn onClick={saveAcc} style={{ justifyContent: "center", marginTop: 6 }}><Save size={15} /> حفظ</PrimaryBtn>
+      </div>
+    </Modal>}
+
+    {movForm && <Modal onClose={() => setMovForm(null)} title="حركة جديدة على حساب">
+      <div style={{ display: "grid", gap: 10 }}>
+        <Field label="الحساب">
+          <Select value={movForm.accountId} onChange={e => setMovForm({ ...movForm, accountId: e.target.value })}>
+            {accounts.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </Select>
+        </Field>
+        <Field label="التاريخ"><Input type="date" value={movForm.date} onChange={e => setMovForm({ ...movForm, date: e.target.value })} /></Field>
+        <Field label="نوع الحركة">
+          <Select value={movForm.direction} onChange={e => setMovForm({ ...movForm, direction: e.target.value })}>
+            <option value="in">إيداع (زيادة)</option>
+            <option value="out">سحب (نقص)</option>
+          </Select>
+        </Field>
+        <Field label="القيمة"><Input type="number" value={movForm.amount} onChange={e => setMovForm({ ...movForm, amount: e.target.value })} /></Field>
+        <Field label="بيان"><Input value={movForm.description} onChange={e => setMovForm({ ...movForm, description: e.target.value })} placeholder="مثال: تحويل من الخزنة لفودافون كاش" /></Field>
+        <PrimaryBtn onClick={saveMov} style={{ justifyContent: "center", marginTop: 6 }}><Save size={15} /> حفظ</PrimaryBtn>
+      </div>
+    </Modal>}
   </div>;
 }
 
@@ -1493,6 +1628,152 @@ function SalariesView({ session, data, reload }) {
 }
 
 // ================= OWNER SETTLEMENT =================
+// ================= ATTENDANCE =================
+function AttendanceView({ session, data, reload }) {
+  const [err, setErr] = useState("");
+  const employees = data.employees || [];
+  const records = data.attendance || [];
+  const todays = (empId) => records.find(r => r.employee_id === empId && r.date === today());
+
+  const checkIn = async (empId) => {
+    setErr("");
+    try {
+      const existing = todays(empId);
+      if (existing) { await update("attendance", session.token, existing.id, { check_in: new Date().toISOString() }); }
+      else { await insert("attendance", session.token, { employee_id: empId, date: today(), check_in: new Date().toISOString() }); }
+      reload();
+    } catch (e) { setErr(e.message); }
+  };
+  const checkOut = async (empId) => {
+    setErr("");
+    try {
+      const existing = todays(empId);
+      if (existing) await update("attendance", session.token, existing.id, { check_out: new Date().toISOString() });
+      reload();
+    } catch (e) { setErr(e.message); }
+  };
+
+  const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString("ar-EG", { hour: "2-digit", minute: "2-digit" }) : "—";
+  const hoursWorked = (r) => {
+    if (!r.check_in || !r.check_out) return "—";
+    const h = (new Date(r.check_out) - new Date(r.check_in)) / 3600000;
+    return h.toFixed(1) + " س";
+  };
+
+  return <div>
+    <SectionTitle>الحضور والانصراف</SectionTitle>
+    <ErrBanner err={err} />
+    <Card style={{ overflow: "auto", marginBottom: 18 }}>
+      <div style={{ padding: "14px 16px 0" }}><strong style={{ fontSize: 14.5 }}>تسجيل اليوم ({today()})</strong></div>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600, marginTop: 8 }}>
+        <thead><tr><Th>الموظف</Th><Th>وقت الحضور</Th><Th>وقت الانصراف</Th><Th></Th></tr></thead>
+        <tbody>
+          {employees.map(emp => {
+            const r = todays(emp.id);
+            return <tr key={emp.id}>
+              <Td style={{ fontWeight: 600 }}>{emp.name}</Td>
+              <Td>{r ? fmtTime(r.check_in) : "—"}</Td>
+              <Td>{r ? fmtTime(r.check_out) : "—"}</Td>
+              <Td><div style={{ display: "flex", gap: 6 }}>
+                <GhostBtn onClick={() => checkIn(emp.id)} style={{ color: "#1a7f37" }}>تسجيل حضور</GhostBtn>
+                <GhostBtn onClick={() => checkOut(emp.id)} style={{ color: "#c0392b" }} disabled={!r || !r.check_in}>تسجيل انصراف</GhostBtn>
+              </div></Td>
+            </tr>;
+          })}
+          {employees.length === 0 && <EmptyRow colSpan={4} text="أضف موظفين أولًا من شاشة الرواتب" />}
+        </tbody>
+      </table>
+    </Card>
+
+    <Card style={{ overflow: "auto" }}>
+      <div style={{ padding: "14px 16px 0" }}><strong style={{ fontSize: 14.5 }}>سجل الحضور</strong></div>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600, marginTop: 8 }}>
+        <thead><tr><Th>التاريخ</Th><Th>الموظف</Th><Th>الحضور</Th><Th>الانصراف</Th><Th>عدد الساعات</Th></tr></thead>
+        <tbody>
+          {records.map(r => (
+            <tr key={r.id}>
+              <Td>{r.date}</Td><Td style={{ fontWeight: 600 }}>{employees.find(e => e.id === r.employee_id)?.name || "-"}</Td>
+              <Td>{fmtTime(r.check_in)}</Td><Td>{fmtTime(r.check_out)}</Td><Td>{hoursWorked(r)}</Td>
+            </tr>
+          ))}
+          {records.length === 0 && <EmptyRow colSpan={5} text="لا يوجد سجل حضور بعد" />}
+        </tbody>
+      </table>
+    </Card>
+  </div>;
+}
+
+// ================= PAYROLL RUN =================
+function PayrollRunView({ session, data, reload }) {
+  const [month, setMonth] = useState("");
+  const [rows, setRows] = useState({});
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const employees = data.employees || [];
+  const payments = (data.salaryPayments || []).filter(p => p.month === month);
+
+  const getRow = (empId) => rows[empId] || { bonus: "", deduction: "", commission: "" };
+  const setRow = (empId, patch) => setRows(r => ({ ...r, [empId]: { ...getRow(empId), ...patch } }));
+
+  const netFor = (emp) => {
+    const r = getRow(emp.id);
+    return Number(emp.monthly_salary || 0) + (Number(r.bonus) || 0) + (Number(r.commission) || 0) - (Number(r.deduction) || 0);
+  };
+
+  const isPaid = (empId) => payments.some(p => p.employee_id === empId);
+
+  const disburse = async (emp) => {
+    if (!month) { setErr("اختار الشهر الأول"); return; }
+    setErr(""); setBusy(true);
+    try {
+      const r = getRow(emp.id);
+      await insert("salary_payments", session.token, {
+        employee_id: emp.id, date: today(), month,
+        amount: netFor(emp),
+        bonus: Number(r.bonus) || 0, deduction: Number(r.deduction) || 0, commission: Number(r.commission) || 0,
+        notes: "مسير رواتب " + month,
+      });
+      reload();
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+
+  const totalNet = employees.reduce((a, e) => a + netFor(e), 0);
+  const totalPaid = payments.reduce((a, p) => a + Number(p.amount || 0), 0);
+
+  return <div>
+    <SectionTitle>مسير الرواتب الشهري</SectionTitle>
+    <ErrBanner err={err} />
+    <Card style={{ padding: 16, marginBottom: 16, maxWidth: 320 }}>
+      <Field label="الشهر (مثال: أغسطس 2026)"><Input value={month} onChange={e => setMonth(e.target.value)} placeholder="اكتب اسم الشهر" /></Field>
+    </Card>
+    <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 18 }}>
+      <StatCard label="إجمالي المستحق (حسب المدخل حاليًا)" value={fmt(totalNet)} color="#1b1b1f" />
+      <StatCard label="تم صرفه فعليًا لهذا الشهر" value={fmt(totalPaid)} color="#1a7f37" />
+    </div>
+    <Card style={{ overflow: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 850 }}>
+        <thead><tr><Th>الموظف</Th><Th>الأساسي</Th><Th>حافز</Th><Th>عمولة</Th><Th>خصم</Th><Th>الصافي</Th><Th></Th></tr></thead>
+        <tbody>
+          {employees.map(emp => {
+            const r = getRow(emp.id);
+            const paid = isPaid(emp.id);
+            return <tr key={emp.id}>
+              <Td style={{ fontWeight: 600 }}>{emp.name}</Td>
+              <Td>{fmt(emp.monthly_salary)}</Td>
+              <Td><Input type="number" value={r.bonus} onChange={e => setRow(emp.id, { bonus: e.target.value })} style={{ width: 80 }} disabled={paid} /></Td>
+              <Td><Input type="number" value={r.commission} onChange={e => setRow(emp.id, { commission: e.target.value })} style={{ width: 80 }} disabled={paid} /></Td>
+              <Td><Input type="number" value={r.deduction} onChange={e => setRow(emp.id, { deduction: e.target.value })} style={{ width: 80 }} disabled={paid} /></Td>
+              <Td style={{ fontWeight: 700 }}>{fmt(netFor(emp))}</Td>
+              <Td>{paid ? <span style={{ color: "#1a7f37", fontWeight: 700, fontSize: 12.5 }}>تم الصرف ✅</span> : <PrimaryBtn onClick={() => disburse(emp)} disabled={busy || !month} style={{ padding: "6px 12px", fontSize: 12.5 }}>صرف</PrimaryBtn>}</Td>
+            </tr>;
+          })}
+          {employees.length === 0 && <EmptyRow colSpan={7} text="أضف موظفين أولًا من شاشة الرواتب" />}
+        </tbody>
+      </table>
+    </Card>
+  </div>;
+}
+
 function SettlementView({ session, data, reload }) {
   const [form, setForm] = useState(null);
   const [err, setErr] = useState("");
